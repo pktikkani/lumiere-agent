@@ -1,0 +1,17 @@
+[project]
+name = "lumiere-agent"
+version = "0.1.0"
+description = "Lumiere — voice-controlled video presentation agent (Pipecat + SmallWebRTC)"
+readme = "README.md"
+requires-python = ">=3.12,<3.13"
+dependencies = [
+    "pipecat-ai[webrtc,silero,openai,anthropic,elevenlabs]>=0.0.60",
+    "python-dotenv>=1.0.1",
+    "uvicorn>=0.30",
+    "fastapi>=0.115",
+    "opencv-python-headless>=4.10,<4.14",
+]
+
+[tool.uv]
+override-dependencies = ["opencv-python; sys_platform == 'never'"]
+# Pin Python for deterministic installs on demo day.

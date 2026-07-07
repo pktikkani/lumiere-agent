@@ -1,0 +1,40 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Lumiere</title>
+  <link rel="stylesheet" href="/client/style.css" />
+</head>
+<body>
+  <div class="stage">
+    <header class="bar">
+      <div class="brand">
+        <span class="dot" id="statusDot"></span>
+        <span class="name">Lumiere</span>
+      </div>
+      <div class="controls">
+        <button id="connectBtn" class="btn primary">Connect mic</button>
+        <span id="status" class="status">idle</span>
+      </div>
+    </header>
+
+    <main class="player">
+      <video id="video" playsinline></video>
+      <div id="nowPlaying" class="now-playing">No video loaded</div>
+    </main>
+
+    <aside class="playlist">
+      <h2>Videos</h2>
+      <ul id="playlist"></ul>
+      <p class="hint">Say: "Lumiere, play the intro", "pause", "next one", "go back to the intro".</p>
+    </aside>
+
+    <footer class="log">
+      <div id="log"></div>
+    </footer>
+  </div>
+
+  <script type="module" src="/client/app.js"></script>
+</body>
+</html>
