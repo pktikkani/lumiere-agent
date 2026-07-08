@@ -22,6 +22,12 @@
     <main class="player">
       <video id="video" playsinline></video>
       <div id="nowPlaying" class="now-playing">No video loaded</div>
+      <div class="vcontrols" id="vcontrols" role="group" aria-label="Playback controls">
+        <button class="vbtn" id="prevBtn" title="Previous" aria-label="Previous">⏮</button>
+        <button class="vbtn" id="playPauseBtn" title="Play / Pause" aria-label="Play or pause">⏸</button>
+        <button class="vbtn" id="nextBtn" title="Next" aria-label="Next">⏭</button>
+        <button class="vbtn" id="restartBtn" title="Restart" aria-label="Restart">↻</button>
+      </div>
     </main>
 
     <aside class="playlist">
@@ -29,10 +35,6 @@
       <ul id="playlist"></ul>
       <p class="hint">Say: "Lumiere, play the intro", "pause", "next one", "go back to the intro".</p>
     </aside>
-
-    <footer class="log">
-      <div id="log"></div>
-    </footer>
   </div>
 
   <script type="module" src="/client/app.js"></script>

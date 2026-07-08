@@ -17,7 +17,10 @@ const els = {
   video: document.getElementById("video"),
   nowPlaying: document.getElementById("nowPlaying"),
   playlist: document.getElementById("playlist"),
-  log: document.getElementById("log"),
+  prevBtn: document.getElementById("prevBtn"),
+  nextBtn: document.getElementById("nextBtn"),
+  restartBtn: document.getElementById("restartBtn"),
+  playPauseBtn: document.getElementById("playPauseBtn"),
 };
 
 let client = null;
@@ -25,11 +28,18 @@ let playlist = [];
 let currentIndex = -1;
 let videoPrimed = false;   // true once the <video> element is blessed for sound (on Connect)
 
+// Logs no longer clutter the UI — forward them to the server so they land in the
+// same log file (see /api/log). Console keeps them for local debugging.
 function log(msg, cls = "") {
-  const line = document.createElement("div");
-  if (cls) line.className = cls;
-  line.textContent = msg;
-  els.log.prepend(line);
+  (cls === "err" ? console.error : console.debug)(msg);
+  try {
+    fetch("/api/log", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ msg: String(msg), level: cls || "info" }),
+      keepalive: true,
+    }).catch(() => {});
+  } catch {}
 }
 function setStatus(t) { els.status.textContent = t; }
 function setDot(cls) { els.statusDot.className = "dot" + (cls ? " " + cls : ""); }
@@ -97,6 +107,11 @@ function handleServerMessage(source, raw) {
     if (c && c.type === "video_control") { applyCommand(c); return; }
   }
   log(`(no video_control found in ${source} payload)`, "err");
+}
+
+function syncPlayIcon() {
+  // Show the action the button will take: ⏸ while playing, ▶ while paused.
+  els.playPauseBtn.textContent = els.video.paused ? "▶" : "⏸";
 }
 
 function applyCommand(cmd) {
@@ -171,6 +186,21 @@ async function connect() {
 els.video.addEventListener("click", () => {
   if (els.video.muted) { els.video.muted = false; els.video.volume = 1.0; log("unmuted"); }
 });
+
+// ---------- manual controls (same local actions the voice commands trigger) ----------
+function togglePlayPause() {
+  if (currentIndex < 0) { playByIndex(0); return; }   // nothing loaded yet -> start first
+  applyCommand({ action: els.video.paused ? "resume" : "pause" });
+}
+els.prevBtn.addEventListener("click", () => applyCommand({ action: "previous" }));
+els.nextBtn.addEventListener("click", () => applyCommand({ action: "next" }));
+els.restartBtn.addEventListener("click", () => applyCommand({ action: "restart" }));
+els.playPauseBtn.addEventListener("click", togglePlayPause);
+// Keep the play/pause glyph honest no matter how state changes (voice, buttons, end).
+els.video.addEventListener("play", syncPlayIcon);
+els.video.addEventListener("pause", syncPlayIcon);
+els.video.addEventListener("ended", syncPlayIcon);
+syncPlayIcon();
 
 els.connectBtn.addEventListener("click", connect);
 loadPlaylist();

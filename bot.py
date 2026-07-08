@@ -3,11 +3,10 @@
 Pipecat pipeline:
 
     transport.input()  (SmallWebRTC, Silero VAD for turn-taking / barge-in)
-      -> OpenAISTTService (gpt-4o-transcribe, streaming)
+      -> ElevenLabsRealtimeSTTService (scribe_v2_realtime, streaming WebSocket)
       -> context aggregator (user)
-      -> AnthropicLLMService (claude-sonnet-5, function calling for video control)
-      -> ElevenLabsTTSService (eleven_flash_v2_5, websocket streaming)
-      -> transport.output()
+      -> AnthropicLLMService (claude-haiku-4-5, function calling for video control)
+      -> transport.output()  (no TTS — silent, action-only agent)
       -> context aggregator (assistant)
 
 Video control is done via LLM function calling. Each tool handler pushes a
@@ -39,7 +38,11 @@ from pipecat.pipeline.task import PipelineParams, PipelineTask
 from pipecat.processors.aggregators.llm_context import LLMContext
 from pipecat.processors.aggregators.llm_response_universal import LLMContextAggregatorPair
 from pipecat.services.anthropic.llm import AnthropicLLMService
-from pipecat.services.elevenlabs.stt import ElevenLabsSTTService
+from pipecat.services.elevenlabs.stt import (
+    CommitStrategy,
+    ElevenLabsRealtimeSTTService,
+    ElevenLabsSTTService,
+)
 from pipecat.services.llm_service import FunctionCallParams, FunctionCallResultProperties
 from pipecat.services.openai.stt import OpenAISTTService
 from pipecat.transports.base_transport import TransportParams
@@ -53,7 +56,9 @@ load_dotenv()
 # whisper-1 works on all OpenAI projects. gpt-4o-transcribe requires special project
 # access (this key's project got a 403 for it). Override via STT_MODEL if yours has it.
 STT_MODEL = os.getenv("STT_MODEL", "whisper-1")
-LLM_MODEL = os.getenv("LLM_MODEL", "claude-sonnet-5")
+# Haiku is plenty for tool-routing and roughly halves the LLM turn latency vs sonnet.
+# Override with LLM_MODEL=claude-sonnet-5 if you want the smarter (slower) model.
+LLM_MODEL = os.getenv("LLM_MODEL", "claude-haiku-4-5")
 
 
 def build_system_prompt(catalog) -> str:
@@ -124,10 +129,114 @@ def build_tools(catalog) -> ToolsSchema:
     )
 
 
-def register_video_tools(llm: AnthropicLLMService, rtvi: RTVIProcessor, catalog, context, base_messages):
-    """Wire each LLM tool to a browser command sent as an RTVI server message.
+import re
 
-    The official Pipecat JS client receives these via `onServerMessage`.
+# Words we ignore when matching a spoken phrase to a video (filler, not content).
+_STOPWORDS = {
+    "the", "a", "an", "to", "please", "video", "now", "this", "that", "one",
+    "demo", "lumiere", "hey", "ok", "okay", "can", "you", "up", "me", "my",
+}
+
+
+def _tokens(s: str) -> list[str]:
+    return [t for t in re.split(r"[^a-z0-9]+", s.lower()) if t]
+
+
+def _match_video(text_tokens: list[str], catalog) -> str | None:
+    """Pick the video whose id/description shares the most words with the phrase."""
+    tset = set(text_tokens)
+    best, best_score = None, 0
+    for v in catalog.videos:
+        kw = (set(_tokens(v.video_id)) | set(_tokens(v.description))) - _STOPWORDS
+        score = len(kw & tset)
+        if score > best_score:
+            best, best_score = v.video_id, score
+    return best if best_score > 0 else None
+
+
+def parse_intent(text: str, catalog):
+    """Resolve a spoken command to (action, video_id|None) locally, no LLM.
+
+    Returns None when the phrase is ambiguous (e.g. 'play the ...' with no
+    recognizable video) so it falls through to the LLM, which is better at fuzzy
+    name matching. Order matters: 'start over' must beat the 'start' play-verb.
+    """
+    toks = _tokens(text)
+    if not toks:
+        return None
+    tset = set(toks)
+    joined = " ".join(toks)
+
+    if tset & {"restart", "replay"} or "over" in tset or "beginning" in tset:
+        return ("restart", None)
+    if tset & {"next", "skip", "forward"}:
+        return ("next", None)
+    if tset & {"previous", "prev", "back"}:
+        return ("previous", None)
+    if tset & {"pause", "hold", "freeze", "stop", "halt", "wait"}:
+        return ("pause", None)
+    if tset & {"resume", "continue", "unpause", "unfreeze"} or "keep going" in joined or "go on" in joined:
+        return ("resume", None)
+    if tset & {"play", "show", "start", "open", "switch", "watch", "begin"}:
+        vid = _match_video(toks, catalog)
+        if vid:
+            return ("play", vid)
+        if tset & {"play", "start", "begin"}:   # bare "play" = resume current
+            return ("resume", None)
+        return None  # ambiguous "show/open ..." -> let the LLM figure it out
+    return None
+
+
+class FastCommandRouter(FrameProcessor):
+    """Intercept final transcripts and execute simple commands WITHOUT the LLM.
+
+    Sits before the context aggregator. If `parse_intent` resolves the phrase, we
+    fire the browser command directly and swallow the frame so the LLM turn is
+    skipped entirely (instant, and no context pollution). Anything unresolved
+    passes through to Claude as before.
+    """
+
+    def __init__(self, catalog, send_command):
+        super().__init__()
+        self._catalog = catalog
+        self._send = send_command
+
+    async def process_frame(self, frame: Frame, direction: FrameDirection):
+        await super().process_frame(frame, direction)
+        if isinstance(frame, TranscriptionFrame):
+            intent = parse_intent(frame.text, self._catalog)
+            if intent:
+                action, video_id = intent
+                if action != "play" or video_id in self._catalog.ids:
+                    logger.info(f"fast-path: {action} {video_id or ''}".strip())
+                    await self._send(action, video_id)
+                    return  # swallow — LLM never runs for this command
+        await self.push_frame(frame, direction)
+
+
+def make_send_command(rtvi: RTVIProcessor):
+    """Return an async fn that pushes a video_control command to the browser.
+
+    Shared by the LLM tool handlers AND the local fast-path router so both routes
+    emit identical RTVI server messages. The official Pipecat JS client receives
+    them via `onServerMessage`.
+    """
+
+    async def send_command(action: str, video_id: str | None = None) -> None:
+        message = {"type": "video_control", "action": action}
+        if video_id is not None:
+            message["video_id"] = video_id
+        logger.info(f"→ browser: {message}")
+        await rtvi.send_server_message(message)
+
+    return send_command
+
+
+def register_video_tools(llm: AnthropicLLMService, catalog, context, base_messages, send_command):
+    """Wire each LLM tool to a browser command via the shared `send_command`.
+
+    Only reached for commands the local fast-path can't resolve (mainly fuzzy
+    'play <video name>' phrasing).
     """
 
     # run_llm=False: after the tool runs we do NOT want Claude to generate a spoken
@@ -141,13 +250,6 @@ def register_video_tools(llm: AnthropicLLMService, rtvi: RTVIProcessor, catalog,
         keeps latency and cost flat no matter how long the demo runs, and prevents stale
         turns from causing duplicate/confused tool calls."""
         context.set_messages(list(base_messages))
-
-    async def send_command(action: str, video_id: str | None = None) -> None:
-        message = {"type": "video_control", "action": action}
-        if video_id is not None:
-            message["video_id"] = video_id
-        logger.info(f"→ browser: {message}")
-        await rtvi.send_server_message(message)
 
     async def play_video(params: FunctionCallParams):
         video_id = params.arguments.get("video_id")
@@ -206,9 +308,20 @@ class TranscriptLog(FrameProcessor):
 
 
 def make_stt(catalog, aiohttp_session):
-    """Speech-to-text. Default: ElevenLabs Scribe (accurate on short commands, less
-    prone to silence hallucinations than Whisper). Set STT_PROVIDER=openai to use
-    Whisper instead. keyterms bias Scribe toward our actual command words + video ids.
+    """Speech-to-text.
+
+    Default (STT_PROVIDER=elevenlabs): ElevenLabs Scribe *Realtime* — a streaming
+    WebSocket STT (scribe_v2_realtime). It transcribes WHILE you speak, so at
+    turn-end the transcript is already ready — no post-utterance file upload. This
+    is what keeps voice commands feeling instant (P99 ~0.4s vs the seconds-long
+    round-trip of the file-based API). CommitStrategy.MANUAL lets Pipecat's own VAD
+    decide the turn boundary, staying consistent with the rest of the pipeline.
+
+    Fallbacks:
+      STT_PROVIDER=elevenlabs-http  -> the old file-based Scribe (accurate but slow).
+      STT_PROVIDER=openai           -> Whisper.
+
+    keyterms bias transcription toward our actual command words + video ids.
     """
     provider = os.getenv("STT_PROVIDER", "elevenlabs").lower()
     keyterms = [
@@ -225,11 +338,19 @@ def make_stt(catalog, aiohttp_session):
         logger.info("STT provider: OpenAI Whisper")
         return OpenAISTTService(model=STT_MODEL, api_key=os.getenv("OPENAI_API_KEY"), prompt=prompt)
 
-    logger.info("STT provider: ElevenLabs Scribe")
-    return ElevenLabsSTTService(
+    if provider == "elevenlabs-http":
+        logger.info("STT provider: ElevenLabs Scribe (file-based, higher latency)")
+        return ElevenLabsSTTService(
+            api_key=os.getenv("ELEVENLABS_API_KEY"),
+            aiohttp_session=aiohttp_session,
+            settings=ElevenLabsSTTService.Settings(keyterms=keyterms),
+        )
+
+    logger.info("STT provider: ElevenLabs Scribe Realtime (streaming)")
+    return ElevenLabsRealtimeSTTService(
         api_key=os.getenv("ELEVENLABS_API_KEY"),
-        aiohttp_session=aiohttp_session,
-        settings=ElevenLabsSTTService.Settings(keyterms=keyterms),
+        commit_strategy=CommitStrategy.MANUAL,
+        settings=ElevenLabsRealtimeSTTService.Settings(keyterms=keyterms),
     )
 
 
@@ -268,10 +389,21 @@ def build_pipeline_task(transport: SmallWebRTCTransport, aiohttp_session) -> Pip
     context = LLMContext(messages=messages, tools=build_tools(catalog))
     aggregators = LLMContextAggregatorPair(context)
 
-    # Register tools after context exists so handlers can reset it after each command.
-    register_video_tools(llm, rtvi, catalog, context, messages)
+    send_command = make_send_command(rtvi)
 
-    # Silent, action-only pipeline: voice -> VAD -> STT -> Claude -> video tool -> browser.
+    # Register tools after context exists so handlers can reset it after each command.
+    register_video_tools(llm, catalog, context, messages, send_command)
+
+    # Local fast-path: resolves plain verbs (pause/resume/next/prev/restart) and clear
+    # 'play <video>' phrases WITHOUT the LLM, so the video reacts the instant STT lands.
+    # Unresolved phrases fall through to Claude. Disable with FAST_PATH=0.
+    fast_path = (
+        [FastCommandRouter(catalog, send_command)]
+        if os.getenv("FAST_PATH", "1") != "0"
+        else []
+    )
+
+    # Silent, action-only pipeline: voice -> VAD -> STT -> [fast-path] -> Claude -> browser.
     # No TTS, but transport.output() MUST be present: RTVI server messages (our
     # video_control commands) travel DOWNSTREAM and are only delivered to the browser
     # by the output transport. Without it the commands are generated but never sent.
@@ -282,6 +414,7 @@ def build_pipeline_task(transport: SmallWebRTCTransport, aiohttp_session) -> Pip
             vad,
             stt,
             TranscriptLog(),
+            *fast_path,
             aggregators.user(),
             llm,
             aggregators.assistant(),
@@ -322,7 +455,11 @@ def make_vad_analyzer() -> SileroVADAnalyzer:
         params=VADParams(
             confidence=0.5,
             start_secs=0.2,
-            stop_secs=0.6,   # slightly long trailing pause so short commands aren't cut
+            # Trailing silence before we call end-of-turn. 0.6 felt laggy; 0.35 fires
+            # much sooner while still riding out the tiny gaps inside a short command.
+            # Pipecat's baseline is 0.2 — drop further if commands still feel delayed,
+            # raise a touch if it starts cutting you off mid-sentence.
+            stop_secs=0.35,
             min_volume=0.15,
         )
     )

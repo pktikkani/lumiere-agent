@@ -16,6 +16,10 @@ import cv2_stub  # noqa: F401  MUST be first: registers a cv2 stub before pipeca
 
 import os
 
+from log_config import setup_logging
+
+setup_logging()  # route all logs to files, keep console quiet — BEFORE importing bot
+
 from dotenv import load_dotenv
 from fastapi import BackgroundTasks, FastAPI
 from fastapi.responses import FileResponse
@@ -73,6 +77,15 @@ async def api_videos():
             for v in catalog.videos
         ]
     }
+
+
+@app.post("/api/log")
+async def api_log(entry: dict):
+    """Browser forwards its logs here so they land in the same file (UI stays clean)."""
+    msg = str(entry.get("msg", ""))
+    level = str(entry.get("level", "info")).upper()
+    logger.log("ERROR" if level == "ERR" else "DEBUG", f"[browser] {msg}")
+    return {"ok": True}
 
 
 @app.post("/api/offer")

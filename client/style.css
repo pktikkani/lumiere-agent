@@ -24,11 +24,10 @@ body {
 .stage {
   display: grid;
   grid-template-columns: 1fr 320px;
-  grid-template-rows: 56px 1fr 120px;
+  grid-template-rows: 56px 1fr;
   grid-template-areas:
     "bar bar"
-    "player playlist"
-    "log playlist";
+    "player playlist";
   height: 100vh;
   gap: 1px;
   background: var(--line);
@@ -114,14 +113,45 @@ body {
 .playlist li.active { background: #1e2430; border-color: var(--accent-dim); }
 .hint { color: var(--muted); font-size: 12px; margin-top: 16px; line-height: 1.5; }
 
-.log {
-  grid-area: log;
-  background: var(--panel);
-  padding: 12px 16px;
-  overflow-y: auto;
-  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
-  font-size: 12px;
+/* Subtle manual playback controls — faint until you hover the player. */
+.vcontrols {
+  position: absolute;
+  bottom: 16px; left: 50%;
+  transform: translateX(-50%);
+  display: flex;
+  gap: 2px;
+  padding: 5px;
+  background: rgba(11, 13, 18, 0.55);
+  border: 1px solid rgba(255, 255, 255, 0.06);
+  border-radius: 999px;
+  backdrop-filter: blur(10px);
+  -webkit-backdrop-filter: blur(10px);
+  opacity: 0;
+  transform: translateX(-50%) translateY(6px);
+  transition: opacity 0.25s ease, transform 0.25s ease;
+  pointer-events: none;
 }
-#log div { color: var(--muted); padding: 2px 0; }
-#log div.cmd { color: var(--accent); }
-#log div.err { color: #f87171; }
+.player:hover .vcontrols,
+.vcontrols:focus-within {
+  opacity: 1;
+  transform: translateX(-50%) translateY(0);
+  pointer-events: auto;
+}
+.vbtn {
+  background: transparent;
+  border: 0;
+  color: var(--text);
+  width: 34px; height: 34px;
+  border-radius: 50%;
+  font-size: 15px;
+  line-height: 1;
+  cursor: pointer;
+  opacity: 0.75;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  transition: background 0.15s, color 0.15s, opacity 0.15s, transform 0.1s;
+}
+.vbtn:hover { background: rgba(217, 178, 90, 0.18); color: var(--accent); opacity: 1; }
+.vbtn:active { transform: scale(0.9); }
+.vbtn:focus-visible { outline: 1px solid var(--accent-dim); outline-offset: 2px; }
