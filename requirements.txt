@@ -45,7 +45,7 @@ colorama==0.4.6 ; sys_platform == 'win32'
     #   click
     #   loguru
     #   tqdm
-cryptography==49.0.0
+cryptography==50.0.0
     # via
     #   aiortc
     #   pyopenssl
