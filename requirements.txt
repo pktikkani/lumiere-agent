@@ -106,7 +106,7 @@ multidict==6.7.1
     # via
     #   aiohttp
     #   yarl
-nltk==3.9.4
+nltk==3.10.3
     # via pipecat-ai
 num2words==0.5.14
     # via pipecat-ai
